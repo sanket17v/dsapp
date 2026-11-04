@@ -1,0 +1,661 @@
+"""
+Experiment 3: CRC (Cyclic Redundancy Check) error detection for ASCII text
+Run:  python exp3_crc.py
+Idea: Sender divides data by a generator using XOR (modulo-2) division and
+      appends the remainder (CRC). Receiver divides again: remainder 0 = OK.
+"""
+
+def ascii_to_binary(text):
+    # Each character -> 8-bit binary string. 'A' (65) -> '01000001'
+    return ''.join(format(ord(ch), '08b') for ch in text)
+
+
+def mod2_divide(dividend, generator):
+    """Modulo-2 (XOR) division. Returns the remainder (n-1 bits)."""
+    n = len(generator)
+    rem = list(dividend)                      # list so we can change bits
+    for i in range(len(dividend) - n + 1):
+        if rem[i] == '1':                     # divide only when leading bit is 1
+            for j in range(n):                # XOR generator with current bits
+                rem[i + j] = '0' if rem[i + j] == generator[j] else '1'
+    return ''.join(rem[-(n - 1):])            # last (n-1) bits = remainder
+
+
+def main():
+    message = input("Enter ASCII message: ")
+    generator = input("Enter generator polynomial bits (e.g. 1101): ").strip()
+    n = len(generator)
+
+    # ---------- SENDER SIDE ----------
+    data = ascii_to_binary(message)
+    appended = data + '0' * (n - 1)           # add (n-1) zeros before dividing
+    crc = mod2_divide(appended, generator)    # CRC checksum
+    frame = data + crc                        # frame actually transmitted
+    print("\nData bits         :", data)
+    print("CRC (checksum)    :", crc)
+    print("Transmitted frame :", frame)
+
+    # ---------- CHANNEL (optional error) ----------
+    received = frame
+    if input("\nSimulate a transmission error? (y/n): ").lower() == 'y':
+        pos = int(input(f"Bit position to flip (0-{len(frame) - 1}): "))
+        flipped = '0' if received[pos] == '1' else '1'
+        received = received[:pos] + flipped + received[pos + 1:]
+        print("Received (with error):", received)
+
+    # ---------- RECEIVER SIDE ----------
+    remainder = mod2_divide(received, generator)
+    print("\nReceiver remainder:", remainder)
+    if '1' in remainder:                      # any 1 = non-zero remainder
+        print("Result: Error detected! Asking sender to retransmit...")
+        # CRC only DETECTS errors; correction = retransmission (ARQ)
+        print("Retransmitted frame:", frame)
+        print("Receiver remainder after retransmission:",
+              mod2_divide(frame, generator), "-> data accepted")
+    else:
+        print("Result: No error detected. Data accepted.")
+
+
+if __name__ == "__main__":
+    main()
+------------------------------------------------------------------------------------------------------
+"""
+Experiment 4a: Go-Back-N ARQ simulation
+Run:  python exp4_go_back_n.py
+Idea: Sender sends a window of frames. If one frame is lost, receiver discards
+      all later frames, so sender goes back and resends from the lost frame.
+"""
+
+total = int(input("Enter total number of frames: "))
+window = int(input("Enter window size (N): "))
+lost = int(input("Frame to simulate as lost (0-indexed, -1 for none): "))
+
+base = 0              # first frame of the current window
+retransmissions = 0   # count of frames sent again
+
+while base < total:
+    end = min(base + window, total)           # window = frames base .. end-1
+    print(f"\nSending window: frames {base} to {end - 1}")
+
+    if base <= lost < end:                    # loss happens inside this window
+        for i in range(base, end):
+            if i < lost:
+                print(f"  Frame {i} -> Acknowledged")
+            elif i == lost:
+                print(f"  Frame {i} -> LOST in transit")
+            else:
+                print(f"  Frame {i} -> Discarded by receiver (out of order)")
+        print(f"  Timeout! Go-Back-N: resending frames {lost} to {end - 1}")
+        retransmissions += end - lost         # all frames from lost onward
+        base = lost                           # GO BACK to the lost frame
+        lost = -1                             # assume it reaches next time
+    else:
+        for i in range(base, end):
+            print(f"  Frame {i} -> Acknowledged")
+        base = end                            # slide window forward
+
+print("\nTotal frames retransmitted (Go-Back-N):", retransmissions)
+-------------------------------------------------------------------------------------------------------------
+"""
+Experiment 4b: Selective Repeat ARQ simulation
+Run:  python exp4_selective_repeat.py
+Idea: Receiver keeps correctly received out-of-order frames. Only the lost
+      frame is retransmitted.
+"""
+
+total = int(input("Enter total number of frames: "))
+window = int(input("Enter window size (N): "))
+lost = int(input("Frame to simulate as lost (0-indexed, -1 for none): "))
+
+acked = [False] * total   # acked[i] = True when frame i is received
+retransmitted = []        # list of frames that had to be resent
+base = 0
+
+while base < total:
+    end = min(base + window, total)
+    print(f"\nSending window: frames {base} to {end - 1}")
+
+    for i in range(base, end):
+        if i == lost:
+            print(f"  Frame {i} -> LOST in transit")
+        else:
+            acked[i] = True                   # receiver buffers it & ACKs it
+            print(f"  Frame {i} -> Received & individually ACKed")
+
+    if base <= lost < end:                    # timeout only for the lost frame
+        print(f"  Timeout for frame {lost} only. Resending frame {lost}")
+        acked[lost] = True
+        retransmitted.append(lost)
+        lost = -1
+
+    while base < total and acked[base]:       # slide window past ACKed frames
+        base += 1
+
+print("\nTotal frames retransmitted (Selective Repeat):", len(retransmitted))
+-------------------------------------------------------------------------------------------
+"""
+Experiment 5a: TCP 'Say Hello' SERVER   (start this FIRST)
+Run:  python exp5a_hello_server.py
+Flow: socket -> bind -> listen -> accept -> recv/send -> close
+"""
+import socket
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)   # TCP socket
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # reuse port quickly
+server.bind(("0.0.0.0", 9001))                               # attach to port 9001
+server.listen(5)                                             # wait for clients
+print("Hello-server listening on port 9001...")
+
+conn, addr = server.accept()                 # blocks until a client connects
+print("Connected by", addr)
+print("Client says:", conn.recv(1024).decode())   # receive greeting
+conn.send("Hello from server!".encode())          # reply
+conn.close()
+server.close()
+--------------------------------------------------------------------
+"""
+Experiment 5a: TCP 'Say Hello' CLIENT
+Run:  python exp5a_hello_client.py   (after the server is running)
+"""
+import socket
+
+client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+client.connect(("127.0.0.1", 9001))          # TCP 3-way handshake happens here
+client.send("Hello from client!".encode())   # send greeting
+print("Server replied:", client.recv(1024).decode())
+client.close()
+------------------------------------------------------------------
+"""
+Experiment 5b: TCP file RECEIVER (server)   (start this FIRST)
+Run:  python exp5b_file_server.py
+"""
+import socket
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("0.0.0.0", 9002))
+server.listen(5)
+print("File-server listening on port 9002...")
+
+conn, addr = server.accept()
+with open("received_file.dat", "wb") as f:   # 'wb' = binary-safe write
+    while True:
+        chunk = conn.recv(4096)              # read up to 4 KB at a time
+        if not chunk:                        # empty = client closed connection
+            break                            # = end of file
+        f.write(chunk)
+print("File received and saved as received_file.dat")
+conn.close()
+server.close()
+-------------------------------------------------------------------
+"""
+Experiment 5b: TCP file SENDER (client)
+Run:  python exp5b_file_client.py            (sends send_file.txt)
+      python exp5b_file_client.py abc.pdf    (sends any file you name)
+"""
+import os
+import socket
+import sys
+
+filename = sys.argv[1] if len(sys.argv) > 1 else "send_file.txt"
+if not os.path.exists(filename):             # make a demo file if missing
+    with open(filename, "w") as f:
+        f.write("This is a demo file for TCP file transfer.\n" * 5)
+
+client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+client.connect(("127.0.0.1", 9002))
+with open(filename, "rb") as f:              # 'rb' = read as raw bytes
+    while True:
+        chunk = f.read(4096)
+        if not chunk:                        # reached end of file
+            break
+        client.sendall(chunk)                # sendall = guarantees all bytes go
+print("File sent successfully.")
+client.close()                               # closing tells server 'file ended'
+----------------------------------------------------------------------------
+"""
+Experiment 5c: TCP calculator SERVER   (start this FIRST)
+Run:  python exp5c_calc_server.py
+Protocol: client sends text like "12 + 7", server replies with the answer.
+"""
+import socket
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("0.0.0.0", 9003))
+server.listen(5)
+print("Calculator server listening on port 9003...")
+
+conn, addr = server.accept()
+expr = conn.recv(256).decode().strip()       # e.g. "12 + 7"
+print("Received:", expr)
+
+try:
+    a, op, b = expr.split()                  # split into 3 parts
+    a, b = float(a), float(b)
+    if op == '+':   result = a + b
+    elif op == '-': result = a - b
+    elif op == '*': result = a * b
+    elif op == '/': result = a / b           # b == 0 raises ZeroDivisionError
+    else: raise ValueError("bad operator")
+    reply = f"{result:g}"                    # 19.0 -> '19'
+except ZeroDivisionError:
+    reply = "Error: division by zero"
+except Exception:
+    reply = "Error: invalid expression"
+
+conn.send(reply.encode())
+conn.close()
+server.close()
+----------------------------------------------------------------------------
+"""
+Experiment 5c: TCP calculator CLIENT
+Run:  python exp5c_calc_client.py   (after the server is running)
+"""
+import socket
+
+client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+client.connect(("127.0.0.1", 9003))
+expr = input("Enter expression (e.g., 12 + 7): ")   # spaces between parts!
+client.send(expr.encode())
+print("Result from server:", client.recv(256).decode())
+client.close()
+--------------------------------------------------------------------
+"""
+Experiment 6: UDP file RECEIVER   (start this FIRST)
+Run:  python exp6_udp_file_receiver.py [output_name]
+Works for any file type (txt, script, mp3, mp4) because all are just bytes.
+"""
+import sys
+
+import socket
+
+CHUNK = 2048                      # must be >= sender chunk size
+END_MARKER = b"<<EOF>>"           # special datagram = 'file finished'
+out_name = sys.argv[1] if len(sys.argv) > 1 else "received_output"
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)   # UDP socket
+sock.bind(("0.0.0.0", 9100))                              # no listen/accept in UDP
+print("UDP file receiver listening on port 9100...")
+
+with open(out_name, "wb") as f:
+    while True:
+        data, addr = sock.recvfrom(CHUNK)    # also gives sender's address
+        if data == END_MARKER:               # end of transfer
+            print("End-of-file marker received. Transfer complete.")
+            break
+        f.write(data)                        # save chunk
+sock.close()
+print("Saved as", out_name)
+------------------------------------------------------------------------------------
+"""
+Experiment 6: UDP file SENDER
+Run:  python exp6_udp_file_sender.py <filename> [receiver_ip]
+Example: python exp6_udp_file_sender.py song.mp3 192.168.1.10
+"""
+import socket
+import sys
+import time
+
+CHUNK = 1024
+END_MARKER = b"<<EOF>>"
+
+if len(sys.argv) < 2:
+    print("Usage: python exp6_udp_file_sender.py <filename> [receiver_ip]")
+    sys.exit(1)
+
+filename = sys.argv[1]
+server_ip = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+with open(filename, "rb") as f:
+    while True:
+        chunk = f.read(CHUNK)                    # read 1 KB
+        if not chunk:
+            break
+        sock.sendto(chunk, (server_ip, 9100))    # each chunk = one datagram
+        time.sleep(0.0005)                       # tiny delay -> fewer drops
+
+sock.sendto(END_MARKER, (server_ip, 9100))       # tell receiver we're done
+print(f"File '{filename}' sent via UDP.")
+sock.close()
+----------------------------------------------------------------------------------
+"""
+Experiment 7a: TCP Peer-to-Peer chat
+Run in two terminals:
+    python exp7a_tcp_p2p_chat.py server
+    python exp7a_tcp_p2p_chat.py client [server_ip]
+"""
+import socket
+import sys
+import threading
+import os
+
+PORT = 9200
+
+
+def receive_loop(conn):
+    """Runs in a separate thread so receiving never blocks typing."""
+    while True:
+        data = conn.recv(1024)
+        if not data:                              # empty = peer disconnected
+            print("\nPeer disconnected.")
+            os._exit(0)                           # close whole program
+        print("\rPeer:", data.decode(), "\nYou: ", end="", flush=True)
+
+
+if len(sys.argv) < 2 or sys.argv[1] not in ("server", "client"):
+    print("Usage: python exp7a_tcp_p2p_chat.py server|client [server_ip]")
+    sys.exit(1)
+
+if sys.argv[1] == "server":
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", PORT))
+    s.listen(1)
+    print("Waiting for peer to connect...")
+    conn, _ = s.accept()
+else:
+    ip = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+    conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    conn.connect((ip, PORT))
+
+print("Connected! Start chatting (type 'exit' to quit).")
+threading.Thread(target=receive_loop, args=(conn,), daemon=True).start()
+
+while True:                                       # main thread = sending
+    msg = input("You: ")
+    if msg == "exit":
+        break
+    conn.send(msg.encode())
+conn.close()
+------------------------------------------------------------------
+"""
+Experiment 7b: TCP Multiuser chat SERVER (broadcasts to everyone)
+Run:  python exp7b_multiuser_server.py
+"""
+import socket
+import threading
+
+clients = []                       # all connected client sockets
+lock = threading.Lock()            # protects 'clients' from thread clashes
+
+
+def broadcast(message, sender):
+    """Send message to every client except the sender."""
+    with lock:
+        for c in clients:
+            if c is not sender:
+                try:
+                    c.send(message.encode())
+                except OSError:
+                    pass           # that client probably left
+
+
+def handle_client(conn, addr):
+    """One thread per client: read its messages and broadcast them."""
+    name = f"{addr[0]}:{addr[1]}"
+    while True:
+        try:
+            data = conn.recv(1024)
+        except OSError:
+            break
+        if not data:               # client disconnected
+            break
+        msg = f"[{name}]: {data.decode()}"
+        print(msg)                 # server console logs everything
+        broadcast(msg, conn)
+    with lock:
+        if conn in clients:
+            clients.remove(conn)
+    conn.close()
+    print(f"{name} disconnected.")
+
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("0.0.0.0", 9201))
+server.listen(10)
+print("Multiuser chat server listening on port 9201...")
+
+while True:
+    conn, addr = server.accept()
+    with lock:
+        clients.append(conn)
+    print(f"{addr[0]}:{addr[1]} connected.")
+    threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+---------------------------------------------------------------------------------------------
+"""
+Experiment 7b: TCP Multiuser chat CLIENT
+Run:  python exp7b_multiuser_client.py [server_ip]
+(open this in 3+ terminals to see broadcast)
+"""
+import os
+import socket
+import sys
+import threading
+
+ip = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect((ip, 9201))
+print("Connected to multiuser chat! (type 'exit' to quit)")
+
+
+def receive_loop():
+    while True:
+        data = sock.recv(1024)
+        if not data:
+            print("\nDisconnected from server.")
+            os._exit(0)
+        print("\r" + data.decode() + "\nYou: ", end="", flush=True)
+
+
+threading.Thread(target=receive_loop, daemon=True).start()
+
+while True:
+    msg = input("You: ")
+    if msg == "exit":
+        break
+    sock.send(msg.encode())
+sock.close()
+--------------------------------------------------------------
+"""
+Experiment 8a: UDP Peer-to-Peer chat
+Run in two terminals with swapped ports:
+    python exp8a_udp_p2p_chat.py 9250 9251
+    python exp8a_udp_p2p_chat.py 9251 9250
+Optional 3rd arg = other peer's IP (default 127.0.0.1)
+"""
+import socket
+import sys
+import threading
+
+if len(sys.argv) < 3:
+    print("Usage: python exp8a_udp_p2p_chat.py <local_port> <remote_port> [remote_ip]")
+    sys.exit(1)
+
+local_port = int(sys.argv[1])
+remote_port = int(sys.argv[2])
+remote_ip = sys.argv[3] if len(sys.argv) > 3 else "127.0.0.1"
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", local_port))               # my own listening port
+print(f"UDP P2P chat ready on port {local_port} "
+      f"(peer {remote_ip}:{remote_port}). Type 'exit' to quit.")
+
+
+def receive_loop():
+    while True:
+        data, _ = sock.recvfrom(1024)            # no connection, just datagrams
+        print("\rPeer:", data.decode(), "\nYou: ", end="", flush=True)
+
+
+threading.Thread(target=receive_loop, daemon=True).start()
+
+while True:
+    msg = input("You: ")
+    if msg == "exit":
+        break
+    sock.sendto(msg.encode(), (remote_ip, remote_port))   # address every time
+sock.close()
+----------------------------------------------------------------------------------
+"""
+Experiment 8b: UDP Multiuser chat SERVER (register with JOIN, then relay)
+Run:  python exp8b_udp_multiuser_server.py
+"""
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", 9300))
+print("UDP multiuser chat server listening on port 9300...")
+
+clients = []        # UDP has no connections, so we remember addresses ourselves
+
+while True:
+    data, addr = sock.recvfrom(1024)
+    msg = data.decode()
+
+    if msg == "JOIN":                            # registration message
+        if addr not in clients:
+            clients.append(addr)
+            print("New client registered:", addr)
+        continue
+
+    text = f"[{addr[0]}:{addr[1]}]: {msg}"
+    print("Relaying message:", text)
+    for c in clients:
+        if c != addr:                            # everyone except the sender
+            sock.sendto(text.encode(), c)
+------------------------------------------------------------------------------------
+"""
+Experiment 8b: UDP Multiuser chat CLIENT
+Run:  python exp8b_udp_multiuser_client.py [server_ip]
+(open in 3+ terminals)
+"""
+import socket
+import sys
+import threading
+
+server = (sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1", 9300)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+sock.sendto(b"JOIN", server)                     # register with the server
+print("Joined UDP multiuser chat. Type 'exit' to quit.")
+
+
+def receive_loop():
+    while True:
+        data, _ = sock.recvfrom(1024)
+        print("\r" + data.decode() + "\nYou: ", end="", flush=True)
+
+
+threading.Thread(target=receive_loop, daemon=True).start()
+
+while True:
+    msg = input("You: ")
+    if msg == "exit":
+        break
+    sock.sendto(msg.encode(), server)
+sock.close()
+-----------------------------------------------------------
+Experiment No. 3
+
+Aim: To write a program that performs error detection (and demonstrates correction/retransmission) for ASCII-coded data using the Cyclic Redundancy Check (CRC) technique.
+
+Objectives:
+• Understand how CRC generates a checksum using polynomial (modulo-2) division.
+• Implement CRC generation at the sender and verification at the receiver.
+• Simulate a transmission error and observe CRC's error-detection capability.
+
+Theory:
+Cyclic Redundancy Check (CRC) is an error-detecting code commonly used in digital networks and storage devices. The sender treats the data bits as a polynomial and divides it (using modulo-2/XOR arithmetic) by a fixed generator polynomial; the remainder is appended to the data as the CRC/FCS (Frame Check Sequence) before transmission.
+
+At the receiver, the same division is performed on the received bit-stream (data + CRC) using the same generator polynomial. If the remainder is zero, the data is assumed to be error-free; a non-zero remainder indicates that the data was corrupted during transmission.
+
+CRC is capable of detecting all single-bit errors, all double-bit errors (for a suitably chosen generator), and most burst errors, making it far more reliable than a simple parity check, though it detects errors rather than correcting them directly. Correction is typically achieved by requesting retransmission (ARQ).
+
+
+Experiment No. 4
+
+Aim: To write a program to simulate the Go-Back-N (GBN) and Selective Repeat (SR) modes of the sliding window protocol used for reliable data transfer.
+
+Objectives:
+• Understand the concept of a sliding window for flow and error control.
+• Implement Go-Back-N ARQ, in which the sender retransmits all frames from the lost frame onward.
+• Implement Selective Repeat ARQ, in which only the specific lost/corrupted frame is retransmitted.
+• Compare the efficiency and buffering requirements of the two schemes.
+
+Theory:
+The Sliding Window Protocol allows a sender to transmit multiple frames before requiring an acknowledgment, improving throughput compared to Stop-and-Wait, while still providing flow control by limiting the number of unacknowledged frames in transit (the window size).
+
+In Go-Back-N ARQ, the receiver only accepts frames in strict sequence order and discards any out-of-order frame; if a frame is lost or corrupted, the sender must retransmit that frame and all subsequent frames already sent, even if some of them were received correctly.
+
+In Selective Repeat ARQ, the receiver buffers out-of-order but correctly received frames and individually acknowledges each frame; only the specific frame(s) that were lost or corrupted need to be retransmitted, which is more efficient over high-error/high-latency links but requires more complex buffering at both ends.
+
+Experiment No. 5
+
+Aim: To write programs using TCP sockets to implement (a) a simple 'Say Hello' exchange, (b) file transfer between client and server, and (c) a remote arithmetic calculator.
+
+Objectives:
+• Understand the TCP client-server socket programming model (socket, bind, listen, accept, connect).
+• Implement a basic message exchange over a reliable, connection-oriented TCP stream.
+• Implement binary-safe file transfer over a TCP socket.
+• Implement a request-response protocol for remote arithmetic computation.
+
+Theory:
+TCP (Transmission Control Protocol) provides a reliable, connection-oriented, byte-stream service between two endpoints. A TCP server creates a socket, binds it to an address/port, listens for incoming connections, and accepts a connection to obtain a dedicated socket for communication; a TCP client creates a socket and calls connect() to establish a three-way handshake with the server.
+
+Once connected, both sides can use send()/recv() to exchange a stream of bytes; TCP guarantees in-order, error-checked delivery, which makes it well suited to applications like file transfer and remote procedure calls where data integrity matters.
+
+A simple application-layer protocol can be layered on top of TCP by agreeing on a message format. For example, the calculator program can send an operator and two operands as a formatted string, and the server parses, computes, and returns the result.
+
+
+
+Experiment No. 6
+
+Aim: To write a program using UDP sockets to enable transfer of different file types (script, text, audio, and video, one file each) between two machines.
+
+Objectives:
+• Understand the connectionless, datagram-oriented nature of UDP.
+• Implement chunked file transfer over UDP using sendto()/recvfrom().
+• Handle files of different types (treated uniformly as binary data) over UDP.
+• Observe the differences in reliability compared to the TCP-based transfer in Experiment 5.
+
+Theory:
+UDP (User Datagram Protocol) is a lightweight, connectionless transport protocol that sends independent datagrams without establishing a connection and without guaranteeing delivery, ordering, or duplicate protection. It has lower overhead than TCP, making it attractive for real-time or simple transfer applications, but the application must implement any reliability it needs.
+
+For file transfer over UDP, a file is broken into fixed-size chunks; each chunk is sent as a separate datagram using sendto(), and the receiver reassembles the file from the datagrams received via recvfrom(). Because UDP does not guarantee order or delivery, sequence numbers and/or an end-of-file marker are commonly used at the application layer to detect missing or out-of-order chunks.
+
+The same program logic applies regardless of file type (text, script, audio, or video) since all are transferred as raw binary bytes; only the source file changes between runs.
+
+Experiment No. 7
+
+Aim: To write programs using TCP sockets to implement (a) a Peer-to-Peer chat application and (b) a Multiuser (broadcast) chat application over a wired network.
+
+Objectives:
+• Implement bidirectional, real-time messaging between two peers using TCP.
+• Extend the design to support multiple simultaneous clients using a server that broadcasts messages.
+• Understand the use of concurrent handling (threads or select()) for multiple connections.
+
+Theory:
+A Peer-to-Peer (P2P) chat over TCP requires simultaneous send and receive capability at both ends; this is commonly implemented by running the send and receive operations on separate threads so that a process can display incoming messages while still accepting user input to send.
+
+A Multiuser chat is typically implemented using a central server that accepts multiple client connections, each handled on its own thread (or via an I/O multiplexing mechanism such as select()/poll()), and broadcasts any message received from one client to all other connected clients.
+
+Because TCP is stream-oriented, application-level framing (e.g., newline-terminated messages) is used so that each message is correctly delimited when read by the receiving side.
+
+Experiment No. 8
+
+Aim: To write programs using UDP sockets to implement (a) a Peer-to-Peer chat application and (b) a Multiuser (broadcast) chat application over a wired network.
+
+Objectives:
+• Implement bidirectional chat between two peers using connectionless UDP datagrams.
+• Implement a multiuser chat where a central server relays datagrams between multiple known clients.
+• Compare the design and behavior of UDP-based chat with the TCP-based chat of Experiment 7.
+
+Theory:
+Unlike TCP, UDP has no notion of an established 'connection'. Each message is sent as an independent datagram using sendto(), addressed explicitly to the destination IP and port, and received using recvfrom(), which also reports the sender's address. A UDP P2P chat therefore uses a single socket at each peer that both sends to and receives from the other peer's known address.
+
+A UDP-based multiuser chat requires the server to explicitly track the address of every client that has sent it a datagram (since there is no persistent connection to enumerate), typically using a registration message; the server then forwards (broadcasts) each received message to every other registered client address using sendto().
+
+Because UDP does not guarantee delivery or ordering, a UDP chat application may occasionally lose or reorder messages, which is acceptable for a lab exercise but would need additional reliability mechanisms for production use.

@@ -1,0 +1,884 @@
+// crc.cpp - CRC based error detection for ASCII data
+// Compile: g++ crc.cpp -o crc      Run: ./crc
+
+#include <iostream>
+#include <string>
+using namespace std;
+
+// Perform modulo-2 (XOR) division and return the remainder string
+string mod2Divide(string dividend, const string &generator) {
+    int n = generator.size();   // length of generator polynomial
+    string rem = dividend;      // working copy, division happens on this
+
+    // Slide left to right while at least n bits remain
+    for (int i = 0; i <= (int)dividend.size() - n; i++) {
+        if (rem[i] == '1') {                    // XOR only when current bit is 1
+            for (int j = 0; j < n; j++)         // XOR generator with n bits from position i
+                rem[i + j] = (rem[i + j] == generator[j]) ? '0' : '1';
+        }
+    }
+    return rem.substr(rem.size() - (n - 1));    // last (n-1) bits = remainder
+}
+
+// Convert ASCII text to a binary string (8 bits per character)
+string asciiToBinary(const string &text) {
+    string bin = "";
+    for (char c : text) {
+        for (int i = 7; i >= 0; i--)                // MSB first
+            bin += ((c >> i) & 1) ? '1' : '0';      // extract bit i
+    }
+    return bin;
+}
+
+int main() {
+    string message, generator;
+    cout << "Enter ASCII message: ";
+    getline(cin, message);                          // full line, spaces allowed
+    cout << "Enter generator polynomial (bits, e.g., 1101): ";
+    cin >> generator;
+
+    string data = asciiToBinary(message);           // message as bits
+    int n = generator.size();
+
+    // ---------- Sender side: compute CRC ----------
+    string appended = data + string(n - 1, '0');    // append (n-1) zeros
+    string crc = mod2Divide(appended, generator);   // remainder = CRC
+    string frame = data + crc;                      // data + CRC = transmitted frame
+    cout << "\nData bits         : " << data;
+    cout << "\nCRC (checksum)    : " << crc;
+    cout << "\nTransmitted frame : " << frame << endl;
+
+    // ---------- Simulate optional transmission error ----------
+    char choice;
+    cout << "\nSimulate a transmission error? (y/n): ";
+    cin >> choice;
+    string received = frame;                        // keep original frame safe
+    if (choice == 'y' || choice == 'Y') {
+        int pos;
+        cout << "Enter bit position to flip (0-" << frame.size() - 1 << "): ";
+        cin >> pos;
+        received[pos] = (received[pos] == '0') ? '1' : '0';   // flip one bit
+        cout << "Received (with error): " << received << endl;
+    }
+
+    // ---------- Receiver side: verify CRC ----------
+    string remainder = mod2Divide(received, generator);       // divide whole frame
+    bool hasError = remainder.find('1') != string::npos;      // any '1' => non-zero remainder
+
+    cout << "\nReceiver-side remainder: " << remainder << endl;
+    if (hasError)
+        cout << "Result: Error detected in received data. Requesting retransmission." << endl;
+    else
+        cout << "Result: No error detected. Data accepted." << endl;
+
+    return 0;
+}
+
+
+
+// go_back_n.cpp - Go-Back-N ARQ simulation
+// Compile: g++ go_back_n.cpp -o gbn      Run: ./gbn
+
+#include <iostream>
+#include <algorithm>   // for min()
+using namespace std;
+
+int main() {
+    int totalFrames, windowSize, lostFrame;
+    cout << "Enter total number of frames: ";
+    cin >> totalFrames;
+    cout << "Enter window size (N): ";
+    cin >> windowSize;
+    cout << "Enter frame number to simulate as lost (0-indexed, -1 for none): ";
+    cin >> lostFrame;
+
+    int base = 0;              // left edge of window (oldest unacknowledged frame)
+    int retransmissions = 0;   // count of frames sent again
+
+    while (base < totalFrames) {
+        // right edge of window (do not go past the last frame)
+        int windowEnd = min(base + windowSize, totalFrames);
+        cout << "\nSending frames " << base << " to " << windowEnd - 1 << " (window)" << endl;
+
+        int failedAt = -1;     // first lost frame in this window (-1 = none)
+
+        for (int i = base; i < windowEnd; i++) {
+            if (i == lostFrame) {
+                cout << "  Frame " << i << " -> LOST in transit" << endl;
+                failedAt = i;
+            } else if (failedAt != -1) {
+                // receiver accepts frames only in order, so later frames are discarded
+                cout << "  Frame " << i << " -> Sent but DISCARDED by receiver (out of order)" << endl;
+            } else {
+                cout << "  Frame " << i << " -> Acknowledged" << endl;
+            }
+        }
+
+        if (failedAt != -1) {
+            cout << "  Timeout! Go-Back-N: retransmitting frames " << failedAt
+                 << " to " << windowEnd - 1 << endl;
+            retransmissions += (windowEnd - failedAt);  // lost frame + all after it
+            lostFrame = -1;     // loss handled; do not lose it again (avoids infinite loop)
+            base = failedAt;    // GO BACK to the lost frame
+        } else {
+            base = windowEnd;   // no loss: slide window forward
+        }
+    }
+
+    cout << "\nTotal frames retransmitted (Go-Back-N): " << retransmissions << endl;
+    return 0;
+}	
+
+
+// selective_repeat.cpp - Selective Repeat ARQ simulation
+// Compile: g++ selective_repeat.cpp -o sr      Run: ./sr
+
+#include <iostream>
+#include <vector>
+#include <set>
+#include <algorithm>   // for min()
+using namespace std;
+
+int main() {
+    int totalFrames, windowSize, lostFrame;
+    cout << "Enter total number of frames: ";
+    cin >> totalFrames;
+    cout << "Enter window size (N): ";
+    cin >> windowSize;
+    cout << "Enter frame number to simulate as lost (0-indexed, -1 for none): ";
+    cin >> lostFrame;
+
+    vector<bool> acked(totalFrames, false);   // individual ACK status of every frame
+    set<int> retransmittedFrames;             // unique frames that were sent again
+    int base = 0;                             // left edge of window
+
+    while (base < totalFrames) {
+        int windowEnd = min(base + windowSize, totalFrames);   // right edge of window
+        cout << "\nSending frames " << base << " to " << windowEnd - 1 << " (window)" << endl;
+
+        for (int i = base; i < windowEnd; i++) {
+            if (i == lostFrame) {
+                cout << "  Frame " << i << " -> LOST in transit" << endl;
+            } else {
+                acked[i] = true;   // receiver keeps (buffers) good frames and ACKs each one
+                cout << "  Frame " << i << " -> Received & individually ACKed" << endl;
+            }
+        }
+
+        // If the lost frame was in this window, resend ONLY that frame
+        if (lostFrame >= base && lostFrame < windowEnd) {
+            cout << "  Timeout for frame " << lostFrame
+                 << " only. Selective Repeat: retransmitting frame " << lostFrame << endl;
+            acked[lostFrame] = true;
+            retransmittedFrames.insert(lostFrame);
+            lostFrame = -1;        // loss handled; do not lose it again
+        }
+
+        // Slide window past all consecutively acknowledged frames
+        while (base < totalFrames && acked[base]) base++;
+    }
+
+    cout << "\nTotal frames individually retransmitted (Selective Repeat): "
+         << retransmittedFrames.size() << endl;
+    return 0;
+}
+
+
+
+// 5a_hello_server.cpp - TCP "Say Hello" server (port 9001)
+// Compile: g++ 5a_hello_server.cpp -o hserver     Run FIRST: ./hserver
+
+#include <iostream>
+#include <string>
+#include <unistd.h>      // close()
+#include <arpa/inet.h>   // socket, bind, htons, sockaddr_in ...
+using namespace std;
+
+int main() {
+    int serverFd = socket(AF_INET, SOCK_STREAM, 0);   // create TCP socket (IPv4)
+    sockaddr_in addr{};                               // address structure (zero-initialised)
+    addr.sin_family = AF_INET;                        // IPv4
+    addr.sin_addr.s_addr = INADDR_ANY;                // accept on any network interface
+    addr.sin_port = htons(9001);                      // port number (host -> network byte order)
+
+    bind(serverFd, (sockaddr*)&addr, sizeof(addr));   // attach socket to IP:port
+    listen(serverFd, 5);                              // start listening (queue of 5)
+    cout << "Hello-server listening on port 9001..." << endl;
+
+    int clientFd = accept(serverFd, nullptr, nullptr);   // wait for client; returns new socket
+    char buffer[1024] = {0};                             // receive buffer (zero-filled)
+    recv(clientFd, buffer, sizeof(buffer) - 1, 0);       // -1 keeps room for '\0'
+    cout << "Client says: " << buffer << endl;
+
+    string reply = "Hello from server!";
+    send(clientFd, reply.c_str(), reply.size(), 0);      // send reply bytes
+
+    close(clientFd);   // close client connection
+    close(serverFd);   // close listening socket
+    return 0;
+}
+
+
+
+
+
+// 5a_hello_client.cpp - TCP "Say Hello" client
+// Compile: g++ 5a_hello_client.cpp -o hclient     Run after server: ./hclient
+
+#include <iostream>
+#include <string>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+int main() {
+    int sockFd = socket(AF_INET, SOCK_STREAM, 0);          // create TCP socket
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(9001);                     // must match server port
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr); // server IP (localhost)
+
+    connect(sockFd, (sockaddr*)&serverAddr, sizeof(serverAddr));   // 3-way handshake
+
+    string msg = "Hello from client!";
+    send(sockFd, msg.c_str(), msg.size(), 0);              // send greeting
+
+    char buffer[1024] = {0};
+    recv(sockFd, buffer, sizeof(buffer) - 1, 0);           // read server reply
+    cout << "Server replied: " << buffer << endl;
+
+    close(sockFd);
+    return 0;
+}
+
+
+
+// 5b_file_server.cpp - TCP file receiving server (port 9002)
+// Compile: g++ 5b_file_server.cpp -o fserver     Run FIRST: ./fserver
+
+#include <iostream>
+#include <fstream>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+int main() {
+    int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(9002);
+
+    bind(serverFd, (sockaddr*)&addr, sizeof(addr));
+    listen(serverFd, 5);
+    cout << "File-server listening on port 9002..." << endl;
+
+    int clientFd = accept(serverFd, nullptr, nullptr);
+    ofstream outFile("received_file.dat", ios::binary);   // binary mode: bytes saved as-is
+
+    char buffer[4096];
+    int bytesRead;
+    // recv() returns 0 when client closes the connection => end of file
+    while ((bytesRead = recv(clientFd, buffer, sizeof(buffer), 0)) > 0)
+        outFile.write(buffer, bytesRead);                 // write only the bytes received
+
+    outFile.close();
+    cout << "File received and saved as received_file.dat" << endl;
+
+    close(clientFd);
+    close(serverFd);
+    return 0;
+}
+
+
+// 5b_file_client.cpp - TCP file sending client
+// Create the file first:  echo "Hello Pune" > send_file.txt
+// Compile: g++ 5b_file_client.cpp -o fclient     Run after server: ./fclient
+
+#include <iostream>
+#include <fstream>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+int main() {
+    int sockFd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(9002);
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
+
+    connect(sockFd, (sockaddr*)&serverAddr, sizeof(serverAddr));
+
+    ifstream inFile("send_file.txt", ios::binary);   // file to send (binary mode)
+    char buffer[4096];
+    // read() fails on the last partial chunk, so also check gcount() > 0
+    while (inFile.read(buffer, sizeof(buffer)) || inFile.gcount() > 0)
+        send(sockFd, buffer, inFile.gcount(), 0);    // send exactly the bytes read
+
+    cout << "File sent successfully." << endl;
+    inFile.close();
+    close(sockFd);   // closing tells the server "file finished"
+    return 0;
+}
+
+
+// 5c_calc_server.cpp - TCP remote calculator server (port 9003)
+// Compile: g++ 5c_calc_server.cpp -o cserver     Run FIRST: ./cserver
+
+#include <iostream>
+#include <string>
+#include <sstream>       // istringstream for parsing
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+int main() {
+    int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(9003);
+
+    bind(serverFd, (sockaddr*)&addr, sizeof(addr));
+    listen(serverFd, 5);
+    cout << "Calculator server listening on port 9003..." << endl;
+
+    int clientFd = accept(serverFd, nullptr, nullptr);
+    char buffer[256] = {0};
+    recv(clientFd, buffer, sizeof(buffer) - 1, 0);       // e.g. "12 + 7"
+
+    double a, b; char op;
+    istringstream iss(buffer);       // read the text like cin
+    iss >> a >> op >> b;             // operand1 operator operand2
+
+    double result = 0;
+    bool valid = true;               // becomes false for bad operator / divide by zero
+    switch (op) {
+        case '+': result = a + b; break;
+        case '-': result = a - b; break;
+        case '*': result = a * b; break;
+        case '/': valid = (b != 0); if (valid) result = a / b; break;   // avoid divide by zero
+        default:  valid = false;     // unknown operator
+    }
+
+    string reply = valid ? to_string(result) : "Error: invalid expression";
+    send(clientFd, reply.c_str(), reply.size(), 0);      // send result as text
+
+    close(clientFd);
+    close(serverFd);
+    return 0;
+}
+
+
+
+// 5c_calc_client.cpp - TCP remote calculator client
+// Compile: g++ 5c_calc_client.cpp -o cclient     Run after server: ./cclient
+
+#include <iostream>
+#include <string>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+int main() {
+    int sockFd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(9003);
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
+
+    connect(sockFd, (sockaddr*)&serverAddr, sizeof(serverAddr));
+
+    string expr;
+    cout << "Enter expression (e.g., 12 + 7): ";
+    getline(cin, expr);                                  // read full line with spaces
+    send(sockFd, expr.c_str(), expr.size(), 0);          // send expression to server
+
+    char buffer[256] = {0};
+    recv(sockFd, buffer, sizeof(buffer) - 1, 0);         // read result
+    cout << "Result from server: " << buffer << endl;
+
+    close(sockFd);
+    return 0;
+}
+
+
+// udp_file_receiver.cpp - UDP file receiver (port 9100)
+// Compile: g++ udp_file_receiver.cpp -o udp_recv     Run FIRST: ./udp_recv
+// Output is saved as "received_output" (rename it after each transfer)
+
+#include <iostream>
+#include <fstream>
+#include <cstring>       // strlen, strncmp
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+#define CHUNK_SIZE 1024                    // must be same in sender and receiver
+const char* END_MARKER = "<<EOF>>";        // special datagram meaning "file finished"
+
+int main() {
+    int sockFd = socket(AF_INET, SOCK_DGRAM, 0);   // UDP socket
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(9100);
+    bind(sockFd, (sockaddr*)&addr, sizeof(addr));  // UDP receiver must bind (no listen/accept)
+
+    cout << "UDP file receiver listening on port 9100..." << endl;
+
+    ofstream outFile("received_output", ios::binary);
+    char buffer[CHUNK_SIZE];
+
+    while (true) {
+        // receive one datagram; sender address not needed, so nullptr
+        int n = recvfrom(sockFd, buffer, CHUNK_SIZE, 0, nullptr, nullptr);
+
+        // check length first, then content, to detect the end marker
+        if (n == (int)strlen(END_MARKER) &&
+            strncmp(buffer, END_MARKER, n) == 0) {
+            cout << "End of file marker received. Transfer complete." << endl;
+            break;
+        }
+        outFile.write(buffer, n);          // write only the bytes received
+    }
+
+    outFile.close();
+    close(sockFd);
+    return 0;
+}
+
+
+// udp_file_sender.cpp - UDP file sender (works for script/text/audio/video)
+// Compile: g++ udp_file_sender.cpp -o udp_send
+// Run:     ./udp_send <filename>      e.g. ./udp_send sample.txt
+
+#include <iostream>
+#include <fstream>
+#include <cstring>
+#include <unistd.h>      // close(), usleep()
+#include <arpa/inet.h>
+using namespace std;
+
+#define CHUNK_SIZE 1024
+const char* END_MARKER = "<<EOF>>";
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {                              // file name is mandatory
+        cout << "Usage: ./udp_send <filename>" << endl;
+        return 1;
+    }
+
+    int sockFd = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(9100);                       // receiver port
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);   // receiver IP (change for 2 machines)
+
+    ifstream inFile(argv[1], ios::binary);
+    if (!inFile) { cout << "Cannot open file: " << argv[1] << endl; return 1; }
+
+    char buffer[CHUNK_SIZE];
+    // read in chunks; gcount() catches the last partial chunk
+    while (inFile.read(buffer, CHUNK_SIZE) || inFile.gcount() > 0) {
+        sendto(sockFd, buffer, inFile.gcount(), 0,
+               (sockaddr*)&serverAddr, sizeof(serverAddr));   // one chunk = one datagram
+        usleep(500);   // small pacing delay to reduce datagram loss
+    }
+
+    // Signal end of transmission (UDP has no connection-close signal)
+    sendto(sockFd, END_MARKER, strlen(END_MARKER), 0,
+           (sockaddr*)&serverAddr, sizeof(serverAddr));
+
+    cout << "File '" << argv[1] << "' sent successfully via UDP." << endl;
+    close(sockFd);
+    return 0;
+}
+
+
+// p2p_chat.cpp - TCP Peer-to-Peer chat (port 9200)
+// Compile: g++ p2p_chat.cpp -o p2p_chat -lpthread
+// Run: ./p2p_chat server   (terminal 1)     ./p2p_chat client   (terminal 2)
+
+#include <iostream>
+#include <string>
+#include <cstdlib>       // exit()
+#include <thread>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+// Runs in a separate thread: keeps receiving and printing peer's messages
+void receiveLoop(int sockFd) {
+    char buffer[1024];
+    while (true) {
+        int n = recv(sockFd, buffer, sizeof(buffer) - 1, 0);
+        if (n <= 0) { cout << "\nPeer disconnected." << endl; exit(0); }   // peer left
+        buffer[n] = '\0';                                      // make it a valid C string
+        cout << "\rPeer: " << buffer << "\nYou: " << flush;    // \r = return to line start
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) { cout << "Usage: ./p2p_chat server|client" << endl; return 1; }
+    int sockFd, connFd;   // connFd = the connected socket used for chatting
+
+    if (string(argv[1]) == "server") {
+        // ----- Server peer: listen and wait for the other peer -----
+        sockFd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(9200);
+        bind(sockFd, (sockaddr*)&addr, sizeof(addr));
+        listen(sockFd, 1);
+        cout << "Waiting for peer to connect..." << endl;
+        connFd = accept(sockFd, nullptr, nullptr);
+    } else {
+        // ----- Client peer: connect to the server peer -----
+        connFd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in serverAddr{};
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(9200);
+        inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
+        connect(connFd, (sockaddr*)&serverAddr, sizeof(serverAddr));
+    }
+
+    cout << "Connected! Start chatting (type 'exit' to quit)." << endl;
+
+    thread receiver(receiveLoop, connFd);   // thread to receive messages
+    receiver.detach();                      // let it run independently
+
+    string msg;
+    while (true) {                          // main thread: read keyboard and send
+        cout << "You: ";
+        getline(cin, msg);
+        if (msg == "exit") break;
+        send(connFd, msg.c_str(), msg.size(), 0);
+    }
+
+    close(connFd);
+    return 0;
+}
+
+
+// multiuser_chat_server.cpp - TCP multiuser chat server (port 9201)
+// Compile: g++ multiuser_chat_server.cpp -o chat_server -lpthread
+// Run FIRST: ./chat_server
+
+#include <iostream>
+#include <string>
+#include <thread>
+#include <vector>
+#include <mutex>
+#include <algorithm>     // remove()
+#include <csignal>       // signal(), SIGPIPE
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+vector<int> clients;     // shared list of connected client sockets
+mutex clientsMutex;      // lock protecting the shared list
+
+// Send msg to every client except the sender
+void broadcast(const string &msg, int excludeFd) {
+    lock_guard<mutex> lock(clientsMutex);   // auto-unlocks at end of function
+    for (int fd : clients)
+        if (fd != excludeFd) send(fd, msg.c_str(), msg.size(), 0);
+}
+
+// One thread runs this function for each connected client
+void handleClient(int clientFd) {
+    char buffer[1024];
+    while (true) {
+        int n = recv(clientFd, buffer, sizeof(buffer) - 1, 0);
+        if (n <= 0) break;                  // client disconnected (or error)
+        buffer[n] = '\0';
+        cout << "[Client " << clientFd << "]: " << buffer << endl;   // server log
+        broadcast(string("[Client ") + to_string(clientFd) + "]: " + buffer, clientFd);
+    }
+    // Client left: remove it from the list safely and close its socket
+    lock_guard<mutex> lock(clientsMutex);
+    clients.erase(remove(clients.begin(), clients.end(), clientFd), clients.end());
+    close(clientFd);
+    cout << "Client " << clientFd << " disconnected." << endl;
+}
+
+int main() {
+    signal(SIGPIPE, SIG_IGN);   // don't crash if we send to an already-closed client
+
+    int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(9201);
+    bind(serverFd, (sockaddr*)&addr, sizeof(addr));
+    listen(serverFd, 10);
+    cout << "Multiuser chat server listening on port 9201..." << endl;
+
+    while (true) {
+        int clientFd = accept(serverFd, nullptr, nullptr);   // wait for a new client
+        { lock_guard<mutex> lock(clientsMutex); clients.push_back(clientFd); }   // add to list
+        cout << "Client " << clientFd << " connected." << endl;
+        thread(handleClient, clientFd).detach();             // dedicated thread per client
+    }
+    return 0;
+}
+
+
+
+// multiuser_chat_client.cpp - TCP multiuser chat client
+// Compile: g++ multiuser_chat_client.cpp -o chat_client -lpthread
+// Run (after server, in 3+ terminals): ./chat_client
+
+#include <iostream>
+#include <string>
+#include <cstdlib>
+#include <thread>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+// Thread: keeps printing broadcast messages coming from the server
+void receiveLoop(int sockFd) {
+    char buffer[1024];
+    while (true) {
+        int n = recv(sockFd, buffer, sizeof(buffer) - 1, 0);
+        if (n <= 0) { cout << "\nDisconnected from server." << endl; exit(0); }
+        buffer[n] = '\0';
+        cout << "\r" << buffer << "\nYou: " << flush;
+    }
+}
+
+int main() {
+    int sockFd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(9201);
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);   // server IP (change for LAN)
+    connect(sockFd, (sockaddr*)&serverAddr, sizeof(serverAddr));
+
+    cout << "Connected to multiuser chat! (type 'exit' to quit)" << endl;
+
+    thread receiver(receiveLoop, sockFd);
+    receiver.detach();
+
+    string msg;
+    while (true) {                 // main thread: read keyboard and send to server
+        cout << "You: ";
+        getline(cin, msg);
+        if (msg == "exit") break;
+        send(sockFd, msg.c_str(), msg.size(), 0);
+    }
+
+    close(sockFd);
+    return 0;
+}
+
+// udp_p2p_chat.cpp - UDP Peer-to-Peer chat
+// Compile: g++ udp_p2p_chat.cpp -o udp_p2p -lpthread
+// Run (ports are swapped):  ./udp_p2p 9250 9251    and    ./udp_p2p 9251 9250
+
+#include <iostream>
+#include <string>
+#include <cstdlib>       // atoi()
+#include <thread>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+// Thread: keeps receiving datagrams from the peer
+void receiveLoop(int sockFd) {
+    char buffer[1024];
+    while (true) {
+        // sender address not needed (we already know our peer), so nullptr
+        int n = recvfrom(sockFd, buffer, sizeof(buffer) - 1, 0, nullptr, nullptr);
+        if (n > 0) {
+            buffer[n] = '\0';
+            cout << "\rPeer: " << buffer << "\nYou: " << flush;
+        }
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 3) {
+        cout << "Usage: ./udp_p2p_chat <local_port> <remote_port>" << endl;
+        return 1;
+    }
+    int localPort = atoi(argv[1]);    // my port (I receive here)
+    int remotePort = atoi(argv[2]);   // friend's port (I send here)
+
+    int sockFd = socket(AF_INET, SOCK_DGRAM, 0);   // one UDP socket for send + receive
+
+    // Bind my own port so that I can receive messages
+    sockaddr_in localAddr{};
+    localAddr.sin_family = AF_INET;
+    localAddr.sin_addr.s_addr = INADDR_ANY;
+    localAddr.sin_port = htons(localPort);
+    bind(sockFd, (sockaddr*)&localAddr, sizeof(localAddr));
+
+    // Address of the peer (destination for sendto)
+    sockaddr_in remoteAddr{};
+    remoteAddr.sin_family = AF_INET;
+    remoteAddr.sin_port = htons(remotePort);
+    inet_pton(AF_INET, "127.0.0.1", &remoteAddr.sin_addr);   // change IP for 2 machines
+
+    cout << "UDP P2P chat ready on port " << localPort
+         << " (peer on port " << remotePort << "). Type 'exit' to quit." << endl;
+
+    thread receiver(receiveLoop, sockFd);
+    receiver.detach();
+
+    string msg;
+    while (true) {
+        cout << "You: ";
+        getline(cin, msg);
+        if (msg == "exit") break;
+        sendto(sockFd, msg.c_str(), msg.size(), 0,
+               (sockaddr*)&remoteAddr, sizeof(remoteAddr));   // address needed on every send
+    }
+    close(sockFd);
+    return 0;
+}
+
+
+// udp_multiuser_server.cpp - UDP multiuser chat server (port 9300)
+// Compile: g++ udp_multiuser_server.cpp -o udp_server
+// Run FIRST: ./udp_server
+
+#include <iostream>
+#include <string>
+#include <vector>
+#include <algorithm>     // any_of()
+#include <unistd.h>
+#include <arpa/inet.h>   // inet_ntoa, ntohs
+using namespace std;
+
+// Two clients are the same only if both IP and port match
+bool sameAddr(const sockaddr_in &a, const sockaddr_in &b) {
+    return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
+}
+
+int main() {
+    int sockFd = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(9300);
+    bind(sockFd, (sockaddr*)&serverAddr, sizeof(serverAddr));
+
+    cout << "UDP multiuser chat server listening on port 9300..." << endl;
+
+    vector<sockaddr_in> clients;      // "diary" of registered client addresses
+    char buffer[1024];
+    sockaddr_in clientAddr{};         // recvfrom fills this with the sender's address
+    socklen_t clientLen = sizeof(clientAddr);
+
+    while (true) {
+        int n = recvfrom(sockFd, buffer, sizeof(buffer) - 1, 0,
+                         (sockaddr*)&clientAddr, &clientLen);
+        if (n <= 0) continue;         // ignore empty/error datagrams
+        buffer[n] = '\0';
+        string msg(buffer);
+
+        // Is the sender already registered?
+        bool known = any_of(clients.begin(), clients.end(),
+                            [&](const sockaddr_in &c) { return sameAddr(c, clientAddr); });
+
+        if (msg == "JOIN") {                  // registration message
+            if (!known) {
+                clients.push_back(clientAddr);   // store a COPY of the address
+                cout << "New client registered: "
+                     << inet_ntoa(clientAddr.sin_addr) << ":"
+                     << ntohs(clientAddr.sin_port) << endl;
+            }
+            continue;                         // JOIN is not relayed
+        }
+
+        // Normal chat message: relay to everyone except the sender
+        cout << "Relaying message: " << msg << endl;
+        for (auto &c : clients)
+            if (!sameAddr(c, clientAddr))
+                sendto(sockFd, msg.c_str(), msg.size(), 0, (sockaddr*)&c, sizeof(c));
+    }
+    return 0;
+}
+
+
+// udp_multiuser_client.cpp - UDP multiuser chat client
+// Compile: g++ udp_multiuser_client.cpp -o udp_client -lpthread
+// Run (after server, in 3+ terminals): ./udp_client
+
+#include <iostream>
+#include <string>
+#include <thread>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+
+// Thread: keeps printing messages relayed by the server
+void receiveLoop(int sockFd) {
+    char buffer[1024];
+    while (true) {
+        int n = recvfrom(sockFd, buffer, sizeof(buffer) - 1, 0, nullptr, nullptr);
+        if (n > 0) {
+            buffer[n] = '\0';
+            cout << "\r" << buffer << "\nYou: " << flush;
+        }
+    }
+}
+
+int main() {
+    int sockFd = socket(AF_INET, SOCK_DGRAM, 0);   // no bind: OS gives a random port on first send
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(9300);
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);   // server IP (change for LAN)
+
+    // Register with the server so it learns our IP:port
+    string join = "JOIN";
+    sendto(sockFd, join.c_str(), join.size(), 0,
+           (sockaddr*)&serverAddr, sizeof(serverAddr));
+    cout << "Joined UDP multiuser chat. Type 'exit' to quit." << endl;
+
+    thread receiver(receiveLoop, sockFd);   // same socket => replies reach us
+    receiver.detach();
+
+    string msg;
+    while (true) {
+        cout << "You: ";
+        getline(cin, msg);
+        if (msg == "exit") break;
+        sendto(sockFd, msg.c_str(), msg.size(), 0,
+               (sockaddr*)&serverAddr, sizeof(serverAddr));   // all messages go to server
+    }
+    close(sockFd);
+    return 0;
+}
+
+
+# 1. CRC
+g++ crc.cpp -o crc
+
+# 2. Sliding window
+g++ go_back_n.cpp -o gbn
+g++ selective_repeat.cpp -o sr
+
+# 3. TCP sockets
+g++ 5a_hello_server.cpp -o hserver   && g++ 5a_hello_client.cpp -o hclient
+g++ 5b_file_server.cpp  -o fserver   && g++ 5b_file_client.cpp  -o fclient
+g++ 5c_calc_server.cpp  -o cserver   && g++ 5c_calc_client.cpp  -o cclient
+
+# 4. UDP file transfer
+g++ udp_file_receiver.cpp -o udp_recv && g++ udp_file_sender.cpp -o udp_send
+
+# 5. TCP chat (-lpthread needed)
+g++ p2p_chat.cpp -o p2p_chat -lpthread
+g++ multiuser_chat_server.cpp -o chat_server -lpthread
+g++ multiuser_chat_client.cpp -o chat_client -lpthread
+
+# 6. UDP chat
+g++ udp_p2p_chat.cpp -o udp_p2p -lpthread
+g++ udp_multiuser_server.cpp -o udp_server
+g++ udp_multiuser_client.cpp -o udp_client -lpthread
